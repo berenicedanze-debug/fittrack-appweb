@@ -70,13 +70,17 @@ const Store = (() => {
   let state = load();
 
   // Écriture différée (150 ms) : plusieurs modifications rapprochées = une seule sauvegarde.
-  const persist = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      try { localStorage.setItem(APP.storageKey, JSON.stringify(state)); }
-      catch (err) { UI.toast('Stockage plein : exportez vos données.'); }
-    }, 150);
+  let pending = false;
+  const write = () => {
+    pending = false;
+    try { localStorage.setItem(APP.storageKey, JSON.stringify(state)); }
+    catch (err) { UI.toast('Stockage plein : exportez vos données.'); }
   };
+  const persist = () => { pending = true; clearTimeout(timer); timer = setTimeout(write, 150); };
+  // Si la page se ferme ou passe en arrière-plan avant la fin du délai, on sauvegarde tout de suite.
+  const flush = () => { if (pending) { clearTimeout(timer); write(); } };
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
   return {
     get: () => state,
@@ -501,6 +505,172 @@ Views.calendrier = (el) => {
   el.querySelectorAll('.day').forEach((b) => b.onclick = () => { Cal.sel = b.dataset.date; Views.calendrier(el); });
   el.querySelector('[data-new]').onclick = () => SessionForm.open(null, Cal.sel);
   bindSessionActions(el);
+};
+
+/* ---------- 5f. OBJECTIFS ----------
+   Un objectif = { id, title, description, type, target, sport, progress, status, startDate, targetDate }.
+   Types :
+   - manual   : vous réglez vous-même le pourcentage (ex. « Perdre 6 kg », « Courir un marathon »)
+   - distance / sessions / duration : calculés AUTOMATIQUEMENT à partir de vos séances
+     « réalisées » depuis la date de début (et du sport choisi, si un sport est précisé). */
+const GOAL_TYPES = { manual: 'Progression manuelle (%)', distance: 'Distance cumulée (km)',
+                     sessions: 'Nombre de séances', duration: 'Temps de sport (heures)' };
+const GOAL_UNITS = { distance: 'km', sessions: 'séances', duration: 'h' };
+const GOAL_STATUS = {
+  active:    { label: 'En cours',  css: 'var(--accent)' },
+  achieved:  { label: 'Atteint',   css: 'var(--done)' },
+  abandoned: { label: 'Abandonné', css: 'var(--rest)' },
+};
+// Modèles proposés quand la liste est vide : un clic pré-remplit le formulaire.
+const GOAL_EXAMPLES = [
+  { title: 'Courir 500 km',     type: 'distance', target: 500, sport: 'Course' },
+  { title: 'Faire 120 séances', type: 'sessions', target: 120 },
+  { title: 'Nager 100 km',      type: 'distance', target: 100, sport: 'Natation' },
+  { title: 'Perdre 6 kg',       type: 'manual' },
+];
+
+const fmtLong = (str) => new Date(str + 'T12:00:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+const daysLeft = (str) => Math.round((new Date(str + 'T12:00:00') - new Date(todayStr() + 'T12:00:00')) / 864e5);
+
+// Calcule l'avancement : { pct (0-100), label (texte de progression) }.
+function goalProgress(g) {
+  if (g.type === 'manual') return { pct: g.progress || 0, label: 'Progression' };
+  const done = Store.get().sessions.filter((s) =>
+    s.status === 'done' && s.date >= g.startDate && (!g.sport || s.sport === g.sport));
+  const sum = (k) => done.reduce((t, s) => t + (s[k] || 0), 0);
+  const cur = g.type === 'distance' ? sum('distance') : g.type === 'sessions' ? done.length : sum('duration') / 60;
+  return { pct: Math.min(100, Math.round((cur / g.target) * 100)), label: `${Math.round(cur * 10) / 10} / ${g.target} ${GOAL_UNITS[g.type]}` };
+}
+// Statut affiché : un objectif « en cours » passe tout seul à « atteint » à 100 %.
+const goalStatus = (g, p) => (g.status === 'active' && p.pct >= 100 ? 'achieved' : g.status);
+
+const GoalForm = {
+  open(goal, preset) {
+    this.id = goal ? goal.id : null;
+    this.data = { title: '', description: '', type: 'manual', target: '', sport: '', progress: 0,
+                  status: 'active', startDate: todayStr(), targetDate: '', ...(preset || {}), ...(goal || {}) };
+    this.el = document.createElement('div');
+    this.el.className = 'modal';
+    document.body.appendChild(this.el);
+    this.render();
+    this.el.querySelector('[name=title]').focus();
+  },
+  close() { this.el.remove(); },
+
+  render() {
+    const d = this.data, chosen = Store.get().sports.map((s) => s.name);
+    const names = chosen.length ? [...chosen] : [...DEFAULT_SPORTS];
+    if (d.sport && !names.includes(d.sport)) names.push(d.sport);
+    this.el.innerHTML = `
+      <form class="sheet card" novalidate>
+        <h2>${this.id ? 'Modifier l\'objectif' : 'Nouvel objectif'}</h2>
+        <label class="field">Titre<input name="title" value="${esc(d.title)}" maxlength="80" placeholder="Ex. : Faire 500 km" required></label>
+        <label class="field">Description (facultatif)<textarea name="description" rows="2" maxlength="300">${esc(d.description)}</textarea></label>
+        <label class="field">Comment mesurer la progression ?
+          <select name="type">${Object.entries(GOAL_TYPES).map(([k, v]) => `<option value="${k}" ${d.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        <div class="grid2" data-auto>
+          <label class="field">Cible<input type="number" name="target" inputmode="decimal" min="0" step="any" value="${esc(d.target)}"></label>
+          <label class="field">Sport concerné<select name="sport"><option value="">Tous les sports</option>
+            ${names.map((n) => `<option value="${esc(n)}" ${n === d.sport ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
+        </div>
+        <label class="field" data-manual>Progression : <output>${d.progress}</output> %
+          <input class="range" type="range" name="progress" min="0" max="100" step="5" value="${d.progress}"></label>
+        <div class="grid2">
+          <label class="field" data-auto>Compter à partir du<input type="date" name="startDate" value="${d.startDate}"></label>
+          <label class="field">Date cible<input type="date" name="targetDate" value="${d.targetDate}"></label>
+        </div>
+        <fieldset class="field"><legend>Statut</legend><div class="chips">
+          ${Object.entries(GOAL_STATUS).filter(([k]) => k !== 'achieved').map(([k, v]) =>
+            `<label class="chip"><input type="radio" name="status" value="${k}" ${d.status === k ? 'checked' : ''}>${v.label}</label>`).join('')}
+        </div></fieldset>
+        <div class="actions"><button type="button" class="btn btn-ghost" data-act="cancel">Annuler</button>
+          <button class="btn" type="submit">Enregistrer</button></div>
+      </form>`;
+    const form = this.el.querySelector('form');
+    // Affiche les champs adaptés au type choisi (cible automatique ou curseur manuel).
+    const sync = () => {
+      const auto = form.elements.type.value !== 'manual';
+      form.querySelectorAll('[data-auto]').forEach((e) => { e.hidden = !auto; });
+      form.querySelectorAll('[data-manual]').forEach((e) => { e.hidden = auto; });
+    };
+    sync();
+    form.addEventListener('submit', (e) => { e.preventDefault(); this.save(form); });
+    form.addEventListener('click', (e) => { if (e.target.dataset.act === 'cancel') this.close(); });
+    form.addEventListener('change', (e) => { if (e.target.name === 'type') sync(); });
+    form.addEventListener('input', (e) => { if (e.target.name === 'progress') form.querySelector('output').textContent = e.target.value; });
+  },
+
+  save(form) {
+    const f = new FormData(form), type = f.get('type');
+    const data = {
+      title: String(f.get('title')).trim(), description: String(f.get('description')).trim(), type,
+      target: parseFloat(f.get('target')) || 0, sport: f.get('sport') || '',
+      progress: parseInt(f.get('progress'), 10) || 0, status: f.get('status'),
+      startDate: f.get('startDate') || todayStr(), targetDate: f.get('targetDate') || '',
+    };
+    if (!data.title) return UI.toast('Donnez un titre à votre objectif.');
+    if (type !== 'manual' && data.target <= 0) return UI.toast('Indiquez une cible supérieure à 0.');
+    Store.update((s) => {
+      const i = this.id ? s.goals.findIndex((x) => x.id === this.id) : -1;
+      if (i >= 0) s.goals[i] = { ...s.goals[i], ...data };
+      else s.goals.push({ id: Store.uid(), createdAt: Date.now(), ...data });
+    });
+    this.close();
+    refreshView();
+    UI.toast(this.id ? 'Objectif modifié.' : 'Objectif créé.');
+  },
+};
+
+// Carte d'un objectif : titre, échéance, barre de progression, actions.
+const goalCard = (g) => {
+  const p = goalProgress(g), key = goalStatus(g, p), st = GOAL_STATUS[key] || GOAL_STATUS.active;
+  let due = '';
+  if (g.targetDate) {
+    const n = daysLeft(g.targetDate);
+    due = `, pour le ${fmtLong(g.targetDate)}` + (key !== 'active' ? '' : n > 0 ? ` (dans ${n} j)` : n === 0 ? ' (aujourd\'hui)' : ` (dépassé de ${-n} j)`);
+  }
+  const slider = g.type === 'manual' && key !== 'abandoned'
+    ? `<input class="range" type="range" min="0" max="100" step="5" value="${g.progress || 0}" data-goal-prog="${g.id}" aria-label="Régler la progression">` : '';
+  const btn = (act, label) => `<button type="button" class="btn btn-ghost" data-goal-act="${act}" data-id="${g.id}">${label}</button>`;
+  return `<article class="item" style="--c:${st.css}">
+    <div class="item-main">
+      <h3>${esc(g.title)}</h3><p class="muted">${st.label}${due}</p>
+      ${g.description ? `<p class="note">${esc(g.description)}</p>` : ''}
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p.pct}" aria-label="${esc(g.title)}"><i style="--p:${p.pct}%"></i></div>
+      <div class="goal-fig"><span>${p.label}</span><b>${p.pct} %</b></div>${slider}
+    </div>
+    <div class="item-actions">${btn('edit', 'Modifier')}${btn('del', 'Supprimer')}</div>
+  </article>`;
+};
+
+Views.objectifs = (el) => {
+  const page = PAGES[3], order = { active: 0, achieved: 1, abandoned: 2 };
+  const goals = [...Store.get().goals].sort((a, b) =>
+    order[goalStatus(a, goalProgress(a))] - order[goalStatus(b, goalProgress(b))] ||
+    (a.targetDate || '9999').localeCompare(b.targetDate || '9999'));
+  el.innerHTML = `
+    <header class="page-head"><h1>${page.label}</h1><p>${page.sub}</p></header>
+    <div class="toolbar"><button class="btn" data-new>${icon('plus')}Nouvel objectif</button></div>
+    ${goals.length ? `<div class="list">${goals.map(goalCard).join('')}</div>` : `
+      <section class="card empty">${icon(page.icon)}<h2>${page.empty[0]}</h2><p>${page.empty[1]}</p>
+        <div class="chips">${GOAL_EXAMPLES.map((x, i) => `<button type="button" class="chip" data-example="${i}">${esc(x.title)}</button>`).join('')}</div>
+      </section>`}`;
+  el.querySelector('[data-new]').onclick = () => GoalForm.open(null);
+  el.querySelectorAll('[data-example]').forEach((b) => b.onclick = () => GoalForm.open(null, GOAL_EXAMPLES[b.dataset.example]));
+  el.querySelectorAll('[data-goal-act]').forEach((b) => b.onclick = () => {
+    const g = Store.get().goals.find((x) => x.id === b.dataset.id);
+    if (!g) return;
+    if (b.dataset.goalAct === 'edit') GoalForm.open(g);
+    else if (confirm(`Supprimer l'objectif « ${g.title} » ?`)) {
+      Store.update((s) => { s.goals = s.goals.filter((x) => x.id !== g.id); });
+      refreshView(); UI.toast('Objectif supprimé.');
+    }
+  });
+  // Curseur rapide des objectifs manuels : enregistré dès qu'on le relâche.
+  el.querySelectorAll('[data-goal-prog]').forEach((r) => r.onchange = () => {
+    Store.update((s) => { s.goals.find((x) => x.id === r.dataset.goalProg).progress = parseInt(r.value, 10); });
+    refreshView();
+  });
 };
 
 /* ---------- 6. ROUTEUR (hash : #/seances) ---------- */

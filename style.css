@@ -207,3 +207,10 @@ select:focus, textarea:focus { border-color: var(--accent); }
 .note { color: var(--muted); font-size: .92rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .item-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .item-actions .btn { padding: 7px 12px; font-size: .85rem; }
+
+/* ---------- 7. OBJECTIFS ---------- */
+[hidden] { display: none !important; }          /* les champs masqués selon le type d'objectif */
+.bar { height: 8px; border-radius: 8px; background: var(--hover); overflow: hidden; }
+.bar > i { display: block; height: 100%; width: var(--p); background: var(--c); border-radius: 8px; transition: width .5s var(--ease); }
+.goal-fig { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; }
+.item .range { width: 100%; accent-color: var(--c); }
