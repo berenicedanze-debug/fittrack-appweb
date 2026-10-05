@@ -12,7 +12,7 @@ const APP = { storageKey: 'sportjournal:v1' };
 
 // Pages de l'application (ordre = ordre du menu). `empty` = message du 1er lancement.
 const PAGES = [
-  { id: 'accueil',     label: 'Accueil',      icon: 'home',     sub: 'Votre tableau de bord personnel.',
+  { id: 'accueil',     label: 'Accueil',      icon: 'home',     sub: 'Votre dashboard.',
     empty: ['Votre tableau de bord est vide', 'Choisissez les cartes à afficher après la configuration de votre profil.'] },
   { id: 'calendrier',  label: 'Calendrier',   icon: 'calendar', sub: 'Planifiez et revoyez vos entraînements.',
     empty: ['Rien de prévu', 'Ajoutez une séance, une compétition ou un jour de repos.'] },
