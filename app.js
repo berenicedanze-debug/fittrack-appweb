@@ -318,6 +318,191 @@ Views.parametres = (el) => {
   el.querySelectorAll('[data-theme]').forEach((b) => b.onclick = () => { UI.setTheme(b.dataset.theme); Views.parametres(el); });
 };
 
+/* ---------- 5d. SÉANCES : modèle, formulaire, liste ----------
+   Une séance = { id, date 'AAAA-MM-JJ', sport, status, effort, duration (min),
+                  distance (km), intensity (1-10), notes }.
+   Elles sont stockées dans Store.get().sessions, donc dans le LocalStorage.   */
+Object.assign(ICONS, {
+  left: '<path d="M15 6l-6 6 6 6"/>', right: '<path d="M9 6l6 6-6 6"/>', plus: '<path d="M12 5v14M5 12h14"/>',
+});
+
+// Statuts et couleurs imposés : vert = réalisée, orange = prévue, rouge = annulée, gris = repos.
+const STATUS = {
+  done:      { label: 'Réalisée', css: 'var(--done)' },
+  planned:   { label: 'Prévue',   css: 'var(--planned)' },
+  cancelled: { label: 'Annulée',  css: 'var(--cancelled)' },
+  rest:      { label: 'Repos',    css: 'var(--rest)' },
+};
+const EFFORTS = ['Endurance', 'Fractionné', 'Force', 'Récupération', 'Technique', 'Compétition'];
+
+// Outils de dates (heure locale, jamais UTC, pour éviter les décalages d'un jour).
+const pad = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const todayStr = () => ymd(new Date());
+const fmtDate = (str) => new Date(str + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+
+// Redessine la page courante sans animation (utilisé après chaque modification).
+const refreshView = () => {
+  const id = PAGES.some((p) => p.id === Router.current()) ? Router.current() : PAGES[0].id;
+  Views[id](document.getElementById('view'));
+};
+
+// État du calendrier : mois affiché et jour sélectionné.
+const Cal = { y: new Date().getFullYear(), m: new Date().getMonth(), sel: todayStr() };
+
+const SessionForm = {
+  // session = séance à modifier (ou modèle à dupliquer) ; date = jour proposé pour une nouvelle séance
+  open(session, date) {
+    const day = (session && session.date) || date || todayStr();
+    this.id = session ? session.id : null;           // pas d'id = nouvelle séance
+    this.data = { date: day, sport: '', status: day <= todayStr() ? 'done' : 'planned',
+                  effort: 'Endurance', duration: '', distance: '', intensity: 5, notes: '', ...(session || {}) };
+    this.el = document.createElement('div');
+    this.el.className = 'modal';
+    document.body.appendChild(this.el);
+    this.render();
+    this.el.querySelector('[name=duration]').focus();
+  },
+  close() { this.el.remove(); },
+
+  render() {
+    const d = this.data, chosen = Store.get().sports.map((s) => s.name);
+    const names = chosen.length ? chosen : DEFAULT_SPORTS;          // sports du profil, sinon liste par défaut
+    if (d.sport && !names.includes(d.sport)) names.push(d.sport);
+    const opts = (list, cur) => list.map((n) => `<option ${n === cur ? 'selected' : ''}>${esc(n)}</option>`).join('');
+    this.el.innerHTML = `
+      <form class="sheet card" novalidate>
+        <h2>${this.id ? 'Modifier la séance' : 'Nouvelle séance'}</h2>
+        <fieldset class="field"><legend>Statut</legend><div class="chips">
+          ${Object.entries(STATUS).map(([k, v]) => `<label class="chip"><input type="radio" name="status" value="${k}" ${d.status === k ? 'checked' : ''}>${v.label}</label>`).join('')}
+        </div></fieldset>
+        <div class="grid2">
+          <label class="field">Sport<select name="sport">${opts(names, d.sport)}</select></label>
+          <label class="field">Date<input type="date" name="date" value="${d.date}" required></label>
+        </div>
+        <div class="grid2">
+          <label class="field">Type d'effort<select name="effort">${opts(EFFORTS, d.effort)}</select></label>
+          <label class="field">Durée (min)<input type="number" inputmode="numeric" name="duration" min="0" value="${esc(d.duration)}"></label>
+        </div>
+        <div class="grid2">
+          <label class="field">Distance (km, facultatif)<input type="number" inputmode="decimal" name="distance" min="0" step="0.01" value="${esc(d.distance)}"></label>
+          <label class="field">Intensité : <output>${d.intensity}</output> / 10
+            <input class="range" type="range" name="intensity" min="1" max="10" value="${d.intensity}"></label>
+        </div>
+        <label class="field">Notes<textarea name="notes" rows="3" maxlength="500">${esc(d.notes)}</textarea></label>
+        <div class="actions"><button type="button" class="btn btn-ghost" data-act="cancel">Annuler</button>
+          <button class="btn" type="submit">Enregistrer</button></div>
+      </form>`;
+    const form = this.el.querySelector('form');
+    form.addEventListener('submit', (e) => { e.preventDefault(); this.save(form); });
+    form.addEventListener('click', (e) => { if (e.target.dataset.act === 'cancel') this.close(); });
+    form.addEventListener('input', (e) => { if (e.target.name === 'intensity') form.querySelector('output').textContent = e.target.value; });
+  },
+
+  // Validation puis écriture dans le Store (→ LocalStorage).
+  save(form) {
+    const f = new FormData(form);
+    const data = {
+      date: f.get('date'), sport: f.get('sport') || '', status: f.get('status'), effort: f.get('effort'),
+      duration: Math.max(0, parseInt(f.get('duration'), 10) || 0),
+      distance: Math.max(0, parseFloat(f.get('distance')) || 0),
+      intensity: parseInt(f.get('intensity'), 10), notes: String(f.get('notes')).trim(),
+    };
+    if (!data.date) return UI.toast('Choisissez une date.');
+    Store.update((s) => {
+      const i = this.id ? s.sessions.findIndex((x) => x.id === this.id) : -1;
+      if (i >= 0) s.sessions[i] = { ...s.sessions[i], ...data };       // modification (ou déplacement si la date change)
+      else s.sessions.push({ id: Store.uid(), createdAt: Date.now(), ...data });
+    });
+    // Le calendrier se place sur le jour enregistré pour que la séance soit visible tout de suite.
+    const [y, m] = data.date.split('-').map(Number);
+    Object.assign(Cal, { y, m: m - 1, sel: data.date });
+    this.close();
+    refreshView();
+    UI.toast(this.id ? 'Séance modifiée.' : 'Séance enregistrée.');
+  },
+};
+
+// Carte d'une séance (utilisée par le calendrier et par la page Séances).
+const sessionItem = (s, withDate) => {
+  const st = STATUS[s.status] || STATUS.planned;
+  const tags = [s.status !== 'rest' && s.effort, s.duration && `${s.duration} min`, s.distance && `${s.distance} km`,
+                s.status !== 'rest' && `intensité ${s.intensity}/10`].filter(Boolean).map((t) => `<span>${esc(t)}</span>`).join('');
+  const btn = (act, label) => `<button type="button" class="btn btn-ghost" data-act="${act}" data-id="${s.id}">${label}</button>`;
+  return `<article class="item" style="--c:${st.css}">
+    <div class="item-main">
+      <h3>${s.status === 'rest' ? 'Jour de repos' : esc(s.sport)}</h3>
+      <p class="muted">${withDate ? fmtDate(s.date) + ', ' : ''}${st.label}</p>
+      ${tags ? `<div class="tags">${tags}</div>` : ''}${s.notes ? `<p class="note">${esc(s.notes)}</p>` : ''}
+    </div>
+    <div class="item-actions">${btn('edit', 'Modifier')}${btn('dup', 'Dupliquer')}${btn('del', 'Supprimer')}</div>
+  </article>`;
+};
+
+// Branche les boutons Modifier / Dupliquer / Supprimer d'une zone de la page.
+const bindSessionActions = (el) => el.querySelectorAll('[data-act][data-id]').forEach((b) => b.onclick = () => {
+  const s = Store.get().sessions.find((x) => x.id === b.dataset.id);
+  if (!s) return;
+  if (b.dataset.act === 'edit') SessionForm.open(s);
+  else if (b.dataset.act === 'dup') SessionForm.open({ ...s, id: undefined, status: 'planned' }, s.date);  // copie à ajuster
+  else if (confirm('Supprimer cette séance ?')) {
+    Store.update((st) => { st.sessions = st.sessions.filter((x) => x.id !== s.id); });
+    refreshView(); UI.toast('Séance supprimée.');
+  }
+});
+
+// Page « Séances » : toutes les séances, de la plus récente à la plus ancienne.
+Views.seances = (el) => {
+  const page = PAGES[2], list = [...Store.get().sessions]
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0));
+  el.innerHTML = `
+    <header class="page-head"><h1>${page.label}</h1><p>${page.sub}</p></header>
+    <div class="toolbar"><button class="btn" data-new>${icon('plus')}Nouvelle séance</button></div>
+    ${list.length ? `<div class="list">${list.map((s) => sessionItem(s, true)).join('')}</div>`
+      : `<section class="card empty">${icon(page.icon)}<h2>${page.empty[0]}</h2><p>${page.empty[1]}</p></section>`}`;
+  el.querySelector('[data-new]').onclick = () => SessionForm.open(null, todayStr());
+  bindSessionActions(el);
+};
+
+/* ---------- 5e. CALENDRIER MENSUEL ---------- */
+Views.calendrier = (el) => {
+  const sessions = Store.get().sessions, first = new Date(Cal.y, Cal.m, 1);
+  const offset = (first.getDay() + 6) % 7;                          // la semaine commence le lundi
+  const nbDays = new Date(Cal.y, Cal.m + 1, 0).getDate();
+  let cells = '<span></span>'.repeat(offset);
+  for (let d = 1; d <= nbDays; d++) {
+    const key = `${Cal.y}-${pad(Cal.m + 1)}-${pad(d)}`, list = sessions.filter((s) => s.date === key);
+    const dots = list.slice(0, 4).map((s) => `<i style="background:${(STATUS[s.status] || STATUS.planned).css}"></i>`).join('');
+    cells += `<button type="button" class="day${key === todayStr() ? ' today' : ''}" data-date="${key}" aria-pressed="${key === Cal.sel}"
+      aria-label="${fmtDate(key)}, ${list.length} séance(s)"><b>${d}</b><span class="dots">${dots}</span></button>`;
+  }
+  const dayList = sessions.filter((s) => s.date === Cal.sel);
+  el.innerHTML = `
+    <header class="page-head"><h1>Calendrier</h1><p>${PAGES[1].sub}</p></header>
+    <div class="toolbar">
+      <button class="btn btn-ghost btn-icon" data-nav="-1" aria-label="Mois précédent">${icon('left')}</button>
+      <h2>${first.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}</h2>
+      <button class="btn btn-ghost btn-icon" data-nav="1" aria-label="Mois suivant">${icon('right')}</button>
+      <button class="btn btn-ghost" data-today>Aujourd'hui</button>
+    </div>
+    <div class="legend">${Object.values(STATUS).map((v) => `<span><i style="background:${v.css}"></i>${v.label}</span>`).join('')}</div>
+    <div class="cal">${['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'].map((w) => `<span class="wd">${w}</span>`).join('')}${cells}</div>
+    <div class="toolbar"><h2 class="day-title">${fmtDate(Cal.sel)}</h2><button class="btn" data-new>${icon('plus')}Ajouter</button></div>
+    <div class="list">${dayList.length ? dayList.map((s) => sessionItem(s, false)).join('')
+      : '<p class="muted">Rien de prévu ce jour-là.</p>'}</div>`;
+
+  el.querySelectorAll('[data-nav]').forEach((b) => b.onclick = () => {
+    const d = new Date(Cal.y, Cal.m + Number(b.dataset.nav), 1);
+    Cal.y = d.getFullYear(); Cal.m = d.getMonth(); Views.calendrier(el);
+  });
+  el.querySelector('[data-today]').onclick = () => {
+    const n = new Date(); Object.assign(Cal, { y: n.getFullYear(), m: n.getMonth(), sel: todayStr() }); Views.calendrier(el);
+  };
+  el.querySelectorAll('.day').forEach((b) => b.onclick = () => { Cal.sel = b.dataset.date; Views.calendrier(el); });
+  el.querySelector('[data-new]').onclick = () => SessionForm.open(null, Cal.sel);
+  bindSessionActions(el);
+};
+
 /* ---------- 6. ROUTEUR (hash : #/seances) ---------- */
 const Router = {
   current: () => (location.hash.replace('#/', '') || PAGES[0].id),
